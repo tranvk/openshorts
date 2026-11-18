@@ -61,7 +61,7 @@ The public `/gta-5-clips`, `/gta-6-clips`, `/wow-forever-clips` and `/platforms/
 these thresholds and the stretch sizes; if the behaviour changes, change
 `dashboard/seo/pages.js` and `dashboard/seo/clip-tools.js` too.
 
-## Local LLM for the moment picker (`llm_backend.py`)
+## Text providers for the moment picker (`llm_backend.py`)
 
 `LLM_BASE_URL` (+ `LLM_MODEL`, `LLM_API_KEY`) routes the two transcript passes of
 `get_viral_clips` to any OpenAI-compatible `/chat/completions` instead of Gemini;
@@ -72,3 +72,36 @@ silently). Self-host `/api/process` then accepts a request without
 `X-Gemini-Key` and `/api/config.localLlm` tells the dashboard not to demand one.
 Frame-based stages (`layout_picker`, `screencast_layout`, `get_visual_clips`)
 stay on Gemini. Never wired in cloud mode: `BILLING_ENABLED` ignores it.
+
+`LLM_PROVIDER=codex-acp` dispatches the same scoring/detail prompts through
+`acp_backend.py` and the maintained `@agentclientprotocol/codex-acp` stdio
+adapter. Each call starts a fresh adapter in an empty temporary directory,
+requires `authentication/status.type == "chat-gpt"`, denies agent permission
+requests, and validates the accumulated assistant text with the same Pydantic
+schema as Gemini. ACP usage/cost metadata is not standardized, so the provider
+returns `(parsed, None)` rather than inventing zero billing.
+
+The child gets an allowlisted environment: runtime/profile/TLS variables only.
+In particular `OPENAI_API_KEY`, `CODEX_API_KEY`, Gemini keys, AWS keys, and other
+application secrets are not inherited. `INITIAL_AGENT_MODE=read-only` and a
+hardened `CODEX_CONFIG` disable shell and web helpers. The client advertises no
+filesystem, terminal, MCP, or elicitation capabilities and rejects every client
+request except by cancelling `session/request_permission`.
+
+These are application controls, not a complete host isolation boundary: Codex's
+read-only sandbox can read files visible to the OS account if a tool becomes
+available through a future adapter/config change. A host with sensitive data
+must therefore use a dedicated unprivileged OS account or VM. The adapter may
+use that account's Codex credential store, but OpenShorts never reads or copies
+credential files. `ACP_CODEX_HOME` selects a dedicated profile that the operator
+must authenticate separately.
+
+No provider failure routes to Gemini. An unknown `LLM_PROVIDER`, a missing
+adapter, wrong auth type, auth expiry, process crash, timeout, malformed JSON,
+or schema violation fails that job. Calls are process-isolated and bounded by
+`ACP_MAX_CONCURRENT`; timeout sends `session/cancel`, closes stdin, then kills
+the process group if graceful cleanup fails.
+
+Claude subscription ACP remains unsupported because Anthropic's current legal
+guidance forbids third-party apps from routing Pro/Max credentials. Selecting
+`LLM_PROVIDER=claude-acp` produces an explicit error, never a Gemini fallback.

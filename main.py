@@ -2162,11 +2162,10 @@ def _run_gemini_stage(client, model_name, prompt, schema):
     """One schema-enforced model call with transient-error backoff.
     Returns (parsed_dict, cost_analysis).
 
-    With an OpenAI-compatible server configured (``llm_backend.active()``)
-    the call goes there instead of Gemini and ``client`` is unused; the
-    retry policy is shared because a local server has the same failure
-    shapes (connection refused while the model loads, a truncated body,
-    a 5xx from a busy vLLM)."""
+    With a text provider configured (``llm_backend.active()``) the call goes
+    there instead of Gemini and ``client`` is unused.  The retry policy is
+    shared because local servers and ACP subprocesses have equivalent
+    transient startup, timeout, and malformed-response failures."""
     use_local = llm_backend.active()
     config = None if use_local else genai_types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -2202,14 +2201,15 @@ def _run_gemini_stage(client, model_name, prompt, schema):
                 '500', 'INTERNAL', 'overloaded', 'Deadline',
                 'empty response body', 'did not contain a JSON object',
                 'Failed to parse Gemini JSON response',
-                # OpenAI-compatible servers: model still loading, busy, or a
-                # small model that skipped a required field this time.
+                # Text providers: model still loading, process crashed, or a
+                # response that skipped a required field this time.
                 'ConnectError', 'ReadTimeout', 'RemoteProtocolError', '502', '504',
-                'validation error'))
+                'validation error', 'ACP provider exited', 'ACP request timed out',
+                'ACP returned malformed JSON'))
             if attempt == max_attempts or not transient:
                 raise
             wait = 5 * (2 ** (attempt - 1))
-            who = "LLM server" if use_local else "Gemini"
+            who = "text AI provider" if use_local else "Gemini"
             print(f"⚠️ {who} transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
             time.sleep(wait)
 
@@ -2268,16 +2268,19 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
     """
     language = str(transcript_result.get('language') or 'unknown')
     if llm_backend.active():
-        # Self-hosted text model: no Google key needed for this stage.
+        # Self-hosted text provider: no Google key needed for this stage.
         client = None
         model_name = llm_backend.model_name()
-        print(f"\U0001f916  Analyzing with local LLM at {llm_backend.base_url()} (2-pass: score → detail)...")
+        backend = llm_backend.describe() or {"provider": llm_backend.provider()}
+        location = (f" at {backend['baseUrl']}" if backend.get("baseUrl") else "")
+        print(f"\U0001f916  Analyzing with {backend['provider']}{location} "
+              "(2-pass: score → detail)...")
     else:
         print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             print("❌ Error: GEMINI_API_KEY not found in environment variables "
-                  "(set it, or point LLM_BASE_URL at an OpenAI-compatible server).")
+                  "(set it, configure LLM_BASE_URL, or select an ACP provider).")
             return None
         client = genai.Client(api_key=api_key)
         model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
@@ -2443,7 +2446,8 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         print(f"🚫 {e}")
         raise
     except Exception as e:
-        print(f"❌ Gemini Error: {e}")
+        who = "text AI provider" if llm_backend.active() else "Gemini"
+        print(f"❌ {who} Error: {e}")
         return None
 
 

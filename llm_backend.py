@@ -1,10 +1,11 @@
-"""Text-only LLM backend for the moment picker: any OpenAI-compatible server.
+"""Text-only LLM backends for the transcript moment picker.
 
 Ollama, LM Studio, vLLM, llama.cpp's server, LocalAI and OpenRouter all speak
-``POST {base}/chat/completions``. When ``LLM_BASE_URL`` is set (or
-``LLM_PROVIDER=openai``), the transcript scoring and detail passes in
-``main.get_viral_clips`` go here instead of Gemini, so a self-hosted install
-can run the whole pipeline without a Google key.
+``POST {base}/chat/completions``. ``LLM_PROVIDER=codex-acp`` instead drives a
+locally installed Codex ACP adapter authenticated with a ChatGPT subscription.
+The transcript scoring and detail passes in ``main.get_viral_clips`` go here
+instead of Gemini, so a self-hosted install can run the spoken-video path
+without a Google key.
 
 What stays on Gemini, because it needs a model that can look at frames or a
 video file: the layout picker (``layout_picker.py``), the on-screen content
@@ -31,16 +32,21 @@ import httpx
 from pydantic import BaseModel
 
 DEFAULT_MODEL = "llama3.1:8b"
+DEFAULT_ACP_MODEL = "subscription-default"
 DEFAULT_TIMEOUT = 600.0  # local models on CPU are slow; a scoring batch can take minutes
 
 
 def provider() -> str:
-    """``"openai"`` when a compatible endpoint is configured, else ``"gemini"``."""
+    """Return the explicitly configured provider (or the legacy inference)."""
     explicit = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
     if explicit in ("openai", "ollama", "local", "openai-compatible"):
         return "openai"
-    if explicit == "gemini":
-        return "gemini"
+    if explicit in ("gemini", "codex-acp", "claude-acp"):
+        return explicit
+    if explicit:
+        # Unknown explicit values must fail closed instead of spending against
+        # Gemini because of a typo.
+        return explicit
     return "openai" if base_url() else "gemini"
 
 
@@ -49,19 +55,42 @@ def base_url() -> str:
 
 
 def model_name() -> str:
+    if provider() == "codex-acp":
+        return (os.environ.get("LLM_MODEL") or "").strip() or DEFAULT_ACP_MODEL
     return (os.environ.get("LLM_MODEL") or "").strip() or DEFAULT_MODEL
 
 
 def active() -> bool:
-    """True when the moment picker should call the OpenAI-compatible server."""
-    return provider() == "openai" and bool(base_url())
+    """True when transcript analysis should not call Gemini."""
+    selected = provider()
+    return (selected == "openai" and bool(base_url())) or selected != "gemini"
 
 
 def describe() -> Optional[dict]:
     """What ``/api/config`` tells the dashboard, or ``None`` when inactive."""
     if not active():
         return None
-    return {"provider": "openai", "model": model_name(), "baseUrl": base_url()}
+    selected = provider()
+    if selected == "openai":
+        return {"provider": "openai", "model": model_name(), "baseUrl": base_url()}
+    if selected == "codex-acp":
+        import acp_backend
+        return {
+            "provider": "codex-acp",
+            "model": model_name(),
+            "transport": "stdio",
+            "subscription": True,
+            "available": acp_backend.command_available(),
+            "visualFeatures": "gemini-required",
+        }
+    return {
+        "provider": selected,
+        "model": model_name(),
+        "available": False,
+        "error": ("Claude subscription routing is not supported by Anthropic's current "
+                  "third-party authentication terms" if selected == "claude-acp"
+                  else "Unknown LLM_PROVIDER"),
+    }
 
 
 def _timeout() -> float:
@@ -108,6 +137,23 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
     provider. Raises on HTTP errors, empty bodies and schema violations; the
     retry policy lives in the caller, same as for Gemini.
     """
+    selected = provider()
+    if selected == "codex-acp":
+        import acp_backend
+        # Only an explicitly configured model should override the subscription
+        # default; main passes model_name() back to us for every provider.
+        chosen = (os.environ.get("LLM_MODEL") or "").strip() or None
+        return acp_backend.generate_json(prompt, schema, model=chosen)
+    if selected == "claude-acp":
+        raise RuntimeError(
+            "LLM_PROVIDER=claude-acp is not supported: Anthropic currently forbids "
+            "third-party applications from routing Claude Pro/Max credentials."
+        )
+    if selected != "openai":
+        raise RuntimeError(f"Unsupported LLM_PROVIDER={selected!r}")
+    if not base_url():
+        raise RuntimeError("LLM_PROVIDER=openai requires LLM_BASE_URL")
+
     import gemini_worker  # local import: keeps this module free of the google SDK
 
     url = f"{base_url()}/chat/completions"

@@ -5647,7 +5647,7 @@ async def get_config(response: Response):
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
         # Self-host only: tells the dashboard the Gemini key is optional
-        # because the moment picker runs on an OpenAI-compatible server.
+        # because the transcript moment picker has another provider.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
     }
 
@@ -6052,8 +6052,8 @@ async def process_endpoint(
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
-        # Self-host with an OpenAI-compatible server configured needs no
-        # Google key for the core pipeline: the moment picker runs there and
+        # Self-host with a text provider configured needs no Google key for
+        # the spoken-video path: the moment picker runs there and
         # the frame-based stages degrade on their own (layout_picker returns
         # "none", silent videos fail with a message that says why).
         raise gemini_missing_error()

@@ -55,6 +55,14 @@ def test_explicit_gemini_provider_wins_over_base_url(local, monkeypatch):
     assert llm_backend.active() is False
 
 
+def test_explicit_openai_without_url_fails_closed(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    assert llm_backend.active() is True
+    with pytest.raises(RuntimeError, match="requires LLM_BASE_URL"):
+        llm_backend.generate_json("prompt", gemini_worker.ScoreResponse)
+
+
 # --- generate_json ---------------------------------------------------------
 
 def test_returns_validated_payload_and_zero_cost(local, monkeypatch):

@@ -98,7 +98,7 @@ Add OpenShorts to Claude or ChatGPT with one URL and ask for clips in plain lang
 
 ### Clip Generator
 - **Viral Moment Detection**: Google Gemini 3.1 Flash-Lite ranks the transcript and scene boundaries to pick 3-15 moments of 15-60 seconds, each with a virality score
-- **Runs fully local if you want**: point `LLM_BASE_URL` at Ollama, LM Studio, vLLM or any OpenAI-compatible server and the moment picker runs on your own model, no Google key needed (see [Run without a Google key](#6-run-without-a-google-key-local-llm-optional))
+- **No Gemini key for spoken-video selection**: use a local OpenAI-compatible model, or `LLM_PROVIDER=codex-acp` with an authenticated ChatGPT subscription (see [Run without a Google key](#6-run-without-a-google-key-local-llm-optional))
 - **Smart 9:16 Reframing**: per scene: TRACK (MediaPipe + YOLOv8 face tracking), GENERAL (blurred background), SPLIT (two speakers stacked, captions on the seam) and SCREENCAST (screen over presenter); the layout is picked per video by Gemini or forced from the dashboard
 - **Captions**: faster-whisper (or Parakeet on GPU) with word-level timestamps, several caption styles, burned into the clip
 - **Clip editor**: word-level cuts, extra segments, framing changes and fast re-renders
@@ -186,6 +186,7 @@ Self-hosting OpenShorts is free. You provide the machine and you only pay for th
 |---------|-----------|-----------|----------|
 | **Google Gemini** | Free trial with generous limits | < $0.01 per 10-min video | Viral moment detection, script generation, web research |
 | **Local LLM (Ollama, LM Studio, vLLM...)** | **Free, your hardware** | $0 | Viral moment detection instead of Gemini (`LLM_BASE_URL`) |
+| **Codex ACP** | Uses an eligible ChatGPT plan | Included within plan limits | Transcript-based viral moment detection (`LLM_PROVIDER=codex-acp`) |
 | **fal.ai** | Pay-per-use | ~$0.50-1.50 per AI Short | Actor generation, talking head video, lip-sync |
 | **ElevenLabs** | Free tier available | Pay-per-use | Voiceover, voice dubbing |
 | **Upload-Post** | **10 free uploads/month** to all networks (no credit card) | Pay-per-use | Auto-publishing to TikTok, Instagram, YouTube |
@@ -312,6 +313,56 @@ know:
   and silent videos (no speech to clip by). Without a Gemini key those fall
   back to the plain face-tracking crop, and a silent video fails with a
   message that says so. Add a key alongside `LLM_BASE_URL` and you get both.
+
+#### Use a ChatGPT subscription through Codex ACP
+
+The transcript scoring/detail path can instead use the maintained
+[`@agentclientprotocol/codex-acp`](https://github.com/agentclientprotocol/codex-acp)
+adapter. OpenShorts never reads or copies Codex credentials and strips API-key
+environment variables from the child process. It requires the adapter to report
+a ChatGPT login before sending any transcript, so a missing login cannot fall
+back to paid API-key billing.
+
+Install and authenticate the adapter on the same Windows account that runs the
+OpenShorts backend (v2.6.0 is the currently tested version):
+
+```powershell
+npm install -g @agentclientprotocol/codex-acp@2.6.0
+codex login
+codex login status
+```
+
+Then configure OpenShorts:
+
+```dotenv
+LLM_PROVIDER=codex-acp
+# Optional when codex-acp is already on PATH:
+# CODEX_ACP_COMMAND=C:\path\to\codex-acp.exe
+# Optional model override; omitted uses the subscription/account default:
+# LLM_MODEL=gpt-5.6-sol
+ACP_TIMEOUT=600
+ACP_MAX_CONCURRENT=2
+```
+
+For a sensitive computer, run OpenShorts and the ACP adapter under a dedicated
+unprivileged Windows account that cannot read personal files. OpenShorts adds an
+empty per-request working directory, read-only Codex mode, disabled shell/web
+features, no MCP servers, denied permission requests, and a secret allowlist,
+but those application controls are not a substitute for an OS account or VM
+boundary. A separate Codex profile can be selected with `ACP_CODEX_HOME`; log in
+with that same setting instead of copying `auth.json`.
+
+Direct stdio mode requires the adapter and authenticated Codex profile in the
+same OS environment as the Python backend. The default Docker Compose stack
+does not mount the user's home directory into the container (intentionally), so
+host-Codex-to-Docker networking needs the separate localhost bridge planned for
+the deployment phase. Do not solve this by mounting the Windows user profile.
+
+Claude subscription ACP is deliberately not enabled. Anthropic's current
+[Claude Code legal guidance](https://code.claude.com/docs/en/legal-and-compliance)
+does not permit third-party applications to route Claude Pro/Max credentials on
+behalf of users. API-key-backed Claude remains possible through the existing
+OpenAI-compatible endpoint path when the endpoint supports that protocol.
 
 ## Technical Pipeline
 
@@ -449,9 +500,15 @@ lives in [`examples/n8n/`](examples/n8n/).
 | `AWS_S3_PUBLIC_BUCKET` | Public bucket for gallery/avatars |
 | `MAX_CONCURRENT_JOBS` | Concurrent processing limit (default: 5) |
 | `LLM_BASE_URL` | OpenAI-compatible server for the moment picker (Ollama, vLLM, LM Studio...). Set it and the Gemini key becomes optional |
-| `LLM_MODEL` | Model name on that server (default `llama3.1:8b`) |
+| `LLM_PROVIDER` | `gemini`, `openai`, or `codex-acp`. Explicit unknown values fail closed instead of falling back to Gemini |
+| `LLM_MODEL` | Model name on the selected provider (OpenAI-compatible default `llama3.1:8b`; omitted for ACP uses the subscription default) |
 | `LLM_API_KEY` | Bearer token for that server, if it checks one |
 | `LLM_SCORE_BATCH` | Transcript windows per scoring call (default 3 local, 8 Gemini) |
+| `CODEX_ACP_COMMAND` | Codex ACP executable (default `codex-acp` on `PATH`) |
+| `CODEX_ACP_ARGS` | Optional JSON array of adapter arguments; never parsed by a shell |
+| `ACP_CODEX_HOME` | Optional dedicated Codex profile directory; authenticate it separately |
+| `ACP_TIMEOUT` | Total seconds allowed for queueing, startup, handshake, and one response (default 600) |
+| `ACP_MAX_CONCURRENT` | Maximum live ACP inference processes (default 2) |
 
 **Client-side (encrypted in localStorage):**
 | Key | Description |
