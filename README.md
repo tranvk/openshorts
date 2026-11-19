@@ -353,10 +353,35 @@ boundary. A separate Codex profile can be selected with `ACP_CODEX_HOME`; log in
 with that same setting instead of copying `auth.json`.
 
 Direct stdio mode requires the adapter and authenticated Codex profile in the
-same OS environment as the Python backend. The default Docker Compose stack
-does not mount the user's home directory into the container (intentionally), so
-host-Codex-to-Docker networking needs the separate localhost bridge planned for
-the deployment phase. Do not solve this by mounting the Windows user profile.
+same OS environment as the Python backend. For the default Docker Compose stack,
+run the narrow authenticated bridge on the Windows host instead. It accepts only
+a prompt plus JSON schema, exposes no command/filesystem/ACP proxy methods, and
+keeps the Codex profile out of Docker.
+
+Generate a strong shared token, place the same value in `.env`, then start the
+bridge from the OpenShorts directory on the authenticated Windows account:
+
+```powershell
+$env:ACP_BRIDGE_TOKEN = (python .\acp_bridge.py --print-token).Trim()
+$env:ACP_BRIDGE_TOKEN  # copy this value into .env as ACP_BRIDGE_TOKEN
+python .\acp_bridge.py --host 0.0.0.0 --allow-non-loopback
+```
+
+```dotenv
+LLM_PROVIDER=codex-acp
+ACP_BRIDGE_URL=http://host.docker.internal:8765
+ACP_BRIDGE_TOKEN=<the same generated token>
+```
+
+Then start or recreate the backend with `docker compose up -d --build`. Docker
+Desktop resolves `host.docker.internal` to the host. Because the bridge must be
+reachable from Docker's private network, restrict inbound TCP 8765 in Windows
+Defender Firewall to Docker Desktop/WSL's private interface or subnet; do not
+allow Public, LAN, or Tailscale interfaces. If a loopback bind is reachable in
+your Docker Desktop configuration, omit both `--host` and
+`--allow-non-loopback` for the safest setup. Every endpoint, including health,
+still requires the bearer token. Never publish port 8765 through Compose and do
+not solve credential access by mounting the Windows user profile.
 
 Claude subscription ACP is deliberately not enabled. Anthropic's current
 [Claude Code legal guidance](https://code.claude.com/docs/en/legal-and-compliance)
@@ -507,6 +532,9 @@ lives in [`examples/n8n/`](examples/n8n/).
 | `CODEX_ACP_COMMAND` | Codex ACP executable (default `codex-acp` on `PATH`) |
 | `CODEX_ACP_ARGS` | Optional JSON array of adapter arguments; never parsed by a shell |
 | `ACP_CODEX_HOME` | Optional dedicated Codex profile directory; authenticate it separately |
+| `ACP_BRIDGE_URL` | Authenticated host bridge URL for Docker (normally `http://host.docker.internal:8765`) |
+| `ACP_BRIDGE_TOKEN` | Random bridge bearer token, at least 32 characters; required when `ACP_BRIDGE_URL` is set |
+| `ACP_BRIDGE_ALLOW_REMOTE` | Emergency override for non-local bridge URLs; avoid it unless a private network and firewall are enforced |
 | `ACP_TIMEOUT` | Total seconds allowed for queueing, startup, handshake, and one response (default 600) |
 | `ACP_MAX_CONCURRENT` | Maximum live ACP inference processes (default 2) |
 

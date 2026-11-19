@@ -75,6 +75,31 @@ def describe() -> Optional[dict]:
         return {"provider": "openai", "model": model_name(), "baseUrl": base_url()}
     if selected == "codex-acp":
         import acp_backend
+        try:
+            bridge = acp_backend.bridge_url()
+        except acp_backend.ACPError as exc:
+            return {
+                "provider": "codex-acp",
+                "model": model_name(),
+                "transport": "http-bridge",
+                "subscription": True,
+                "available": False,
+                "visualFeatures": "gemini-required",
+                "error": str(exc),
+            }
+        if bridge:
+            status = acp_backend.bridge_status()
+            result = {
+                "provider": "codex-acp",
+                "model": model_name(),
+                "transport": "http-bridge",
+                "subscription": True,
+                "available": status["available"],
+                "visualFeatures": "gemini-required",
+            }
+            if status.get("error"):
+                result["error"] = status["error"]
+            return result
         return {
             "provider": "codex-acp",
             "model": model_name(),

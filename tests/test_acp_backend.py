@@ -1,11 +1,16 @@
 """Codex ACP subscription backend, exercised through a fake stdio agent."""
 import json
 import sys
+import threading
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
 import acp_backend
+import acp_bridge
 import gemini_worker
 import llm_backend
 
@@ -112,6 +117,92 @@ def test_valid_acp_response_is_schema_validated(monkeypatch):
     parsed, cost = llm_backend.generate_json("untrusted transcript", gemini_worker.ScoreResponse)
     assert parsed["windows"][0]["score"] == 88
     assert cost is None  # ACP does not promise usage or billing data.
+
+
+def test_authenticated_host_bridge_runs_full_inference_path(monkeypatch):
+    _configure(monkeypatch, _fake_agent(_valid_score(), permission=True))
+    token = "bridge-test-token-" + ("x" * 32)
+    server = acp_bridge.make_server("127.0.0.1", 0, token)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv(
+            "ACP_BRIDGE_URL", f"http://127.0.0.1:{server.server_port}"
+        )
+        monkeypatch.setenv("ACP_BRIDGE_TOKEN", token)
+
+        parsed, cost = llm_backend.generate_json(
+            "untrusted transcript", gemini_worker.ScoreResponse
+        )
+
+        assert parsed["windows"][0]["score"] == 88
+        assert cost is None
+        assert llm_backend.describe() == {
+            "provider": "codex-acp",
+            "model": "subscription-default",
+            "transport": "http-bridge",
+            "subscription": True,
+            "available": True,
+            "visualFeatures": "gemini-required",
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_host_bridge_rejects_unauthenticated_health_check(monkeypatch):
+    token = "bridge-test-token-" + ("x" * 32)
+    server = acp_bridge.make_server("127.0.0.1", 0, token)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/health"
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(request, timeout=2)
+        assert exc.value.code == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_bridge_configuration_requires_strong_token_and_local_url(monkeypatch):
+    monkeypatch.setenv("ACP_BRIDGE_URL", "http://host.docker.internal:8765")
+    monkeypatch.setenv("ACP_BRIDGE_TOKEN", "short")
+    with pytest.raises(acp_backend.ACPError, match="at least 32"):
+        acp_backend._bridge_http("/health", None, 0.1)
+
+    monkeypatch.setenv("ACP_BRIDGE_URL", "http://bridge.example.com:8765")
+    with pytest.raises(acp_backend.ACPError, match="host.docker.internal"):
+        acp_backend.bridge_url()
+    monkeypatch.setenv("LLM_PROVIDER", "codex-acp")
+    description = llm_backend.describe()
+    assert description["available"] is False
+    assert "host.docker.internal" in description["error"]
+
+
+def test_bridge_server_rejects_short_token():
+    with pytest.raises(ValueError, match="at least 32"):
+        acp_bridge.make_server("127.0.0.1", 0, "short")
+
+
+def test_bridge_cli_requires_explicit_non_loopback_opt_in(monkeypatch):
+    monkeypatch.setenv("ACP_BRIDGE_TOKEN", "x" * 40)
+    monkeypatch.setattr(acp_bridge, "_arguments", lambda: SimpleNamespace(
+        print_token=False,
+        host="0.0.0.0",
+        port=8765,
+        allow_non_loopback=False,
+    ))
+    monkeypatch.setattr(
+        acp_bridge,
+        "make_server",
+        lambda *_args: pytest.fail("server must not bind without explicit opt-in"),
+    )
+    assert acp_bridge.main() == 2
 
 
 def test_api_key_auth_is_refused_before_prompt(monkeypatch):

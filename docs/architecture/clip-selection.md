@@ -96,6 +96,17 @@ use that account's Codex credential store, but OpenShorts never reads or copies
 credential files. `ACP_CODEX_HOME` selects a dedicated profile that the operator
 must authenticate separately.
 
+When OpenShorts runs in Docker but the authenticated Codex profile lives on the
+Windows host, `acp_bridge.py` provides the deployment boundary. The container
+sends an authenticated HTTP request containing only the prompt, JSON schema,
+and optional model; the host bridge invokes the same constrained stdio path and
+returns only assistant text. The bridge has no generic command, filesystem, or
+ACP passthrough endpoint. Its health endpoint is authenticated, bridge URLs are
+limited to localhost/`host.docker.internal` by default, and neither credentials
+nor the host profile are mounted into the container. Non-loopback binding
+requires an explicit CLI opt-in and a Windows firewall rule scoped to Docker's
+private network.
+
 No provider failure routes to Gemini. An unknown `LLM_PROVIDER`, a missing
 adapter, wrong auth type, auth expiry, process crash, timeout, malformed JSON,
 or schema violation fails that job. Calls are process-isolated and bounded by

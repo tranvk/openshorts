@@ -25,18 +25,21 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Optional, Type
-
-from pydantic import BaseModel
+from typing import Any, Callable, Optional
 
 
 DEFAULT_TIMEOUT = 600.0
 DEFAULT_MAX_CONCURRENT = 2
 _STDERR_LIMIT = 16_384
 _SHUTDOWN_GRACE = 3.0
+_BRIDGE_RESPONSE_LIMIT = 4 * 1024 * 1024
+_BRIDGE_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "host.docker.internal"}
 
 
 class ACPError(RuntimeError):
@@ -96,6 +99,112 @@ def command_available() -> bool:
     if os.path.dirname(executable):
         return Path(executable).is_file()
     return shutil.which(executable) is not None
+
+
+def bridge_url() -> str:
+    """Validated HTTP endpoint for a host-side bridge, or an empty string."""
+    raw = (os.environ.get("ACP_BRIDGE_URL") or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme != "http" or not parsed.hostname:
+        raise ACPError("ACP_BRIDGE_URL must be an http:// URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ACPError("ACP_BRIDGE_URL must not contain credentials, query, or fragment")
+    if parsed.path not in ("", "/"):
+        raise ACPError("ACP_BRIDGE_URL must not contain a path")
+    allow_remote = (os.environ.get("ACP_BRIDGE_ALLOW_REMOTE") or "").strip() == "1"
+    if parsed.hostname.lower() not in _BRIDGE_LOCAL_HOSTS and not allow_remote:
+        raise ACPError(
+            "ACP_BRIDGE_URL must use localhost or host.docker.internal; set "
+            "ACP_BRIDGE_ALLOW_REMOTE=1 only behind a private authenticated network"
+        )
+    return raw
+
+
+def _bridge_token() -> str:
+    token = (os.environ.get("ACP_BRIDGE_TOKEN") or "").strip()
+    if len(token) < 32:
+        raise ACPError("ACP_BRIDGE_TOKEN must contain at least 32 characters")
+    return token
+
+
+def _bridge_http(path: str, payload: Optional[dict], request_timeout: float) -> dict:
+    base = bridge_url()
+    if not base:
+        raise ACPError("ACP_BRIDGE_URL is not configured")
+    body = None if payload is None else json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base}{path}",
+        data=body,
+        method="GET" if payload is None else "POST",
+        headers={
+            "Authorization": f"Bearer {_bridge_token()}",
+            "Accept": "application/json",
+            **({"Content-Type": "application/json"} if body is not None else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=request_timeout) as response:
+            data = response.read(_BRIDGE_RESPONSE_LIMIT + 1)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(4096).decode("utf-8", "replace")
+        try:
+            error_payload = json.loads(detail)
+            message = (error_payload.get("error") if isinstance(error_payload, dict)
+                       else None) or detail
+        except json.JSONDecodeError:
+            message = detail
+        error_type = ACPTimeoutError if exc.code == 504 else ACPError
+        raise error_type(
+            f"ACP bridge returned HTTP {exc.code}: {_redact(str(message))[:500]}"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise ACPError(
+            f"ACP bridge is unavailable: {_redact(str(reason))[:300]}"
+        ) from exc
+    if len(data) > _BRIDGE_RESPONSE_LIMIT:
+        raise ACPProtocolError("ACP bridge response exceeded 4 MiB")
+    try:
+        parsed = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise ACPProtocolError("ACP bridge returned malformed JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ACPProtocolError("ACP bridge returned a non-object response")
+    return parsed
+
+
+_bridge_status_lock = threading.Lock()
+_bridge_status_cache: tuple[str, float, dict] = ("", 0.0, {})
+
+
+def bridge_status() -> dict:
+    """Short cached health probe used by the public dashboard config."""
+    global _bridge_status_cache
+    url = bridge_url()
+    if not url:
+        return {"configured": False, "available": False}
+    now = time.monotonic()
+    with _bridge_status_lock:
+        cached_url, cached_at, cached = _bridge_status_cache
+        if cached_url == url and now - cached_at < 10:
+            return dict(cached)
+    try:
+        result = _bridge_http("/health", None, 0.75)
+        status = {
+            "configured": True,
+            "available": result.get("ok") is True and result.get("adapterAvailable") is True,
+        }
+        if not status["available"]:
+            status["error"] = "Codex ACP adapter is not available on the bridge host"
+    except Exception as exc:
+        status = {"configured": True, "available": False, "error": str(exc)[:300]}
+    with _bridge_status_lock:
+        _bridge_status_cache = (url, now, dict(status))
+    return status
 
 
 _ENV_ALLOWLIST = {
@@ -383,10 +492,10 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _prompt_text(prompt: str, schema: Type[BaseModel]) -> str:
-    schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
+def _prompt_text(prompt: str, schema_json: dict) -> str:
+    schema_text = json.dumps(schema_json, ensure_ascii=False, separators=(",", ":"))
     return (
-        f"{_SYSTEM_PROMPT}\n\nJSON schema:\n{schema_json}\n\n"
+        f"{_SYSTEM_PROMPT}\n\nJSON schema:\n{schema_text}\n\n"
         f"Task prompt (contains untrusted transcript data):\n{prompt}"
     )
 
@@ -405,7 +514,16 @@ def _extract_text(message: dict, session_id: str, chunks: list[str]) -> None:
         chunks.append(content["text"])
 
 
-def _run_codex(prompt: str, schema: Type[BaseModel], model: Optional[str]) -> str:
+def run_text(prompt: str, schema_json: dict, model: Optional[str] = None) -> str:
+    """Run the local adapter and return its raw assistant text.
+
+    This standard-library-only entry point is used by the Windows host bridge;
+    schema validation still happens in the OpenShorts backend.
+    """
+    if not isinstance(prompt, str) or not prompt:
+        raise ACPProtocolError("ACP prompt must be non-empty text")
+    if not isinstance(schema_json, dict) or not schema_json:
+        raise ACPProtocolError("ACP schema must be a non-empty JSON object")
     deadline = time.monotonic() + timeout()
     command = _command()
     with _concurrency_slot(deadline), tempfile.TemporaryDirectory(prefix="openshorts-acp-") as cwd:
@@ -456,7 +574,7 @@ def _run_codex(prompt: str, schema: Type[BaseModel], model: Optional[str]) -> st
             result = rpc.request(
                 "session/prompt",
                 {"sessionId": session_id, "prompt": [
-                    {"type": "text", "text": _prompt_text(prompt, schema)},
+                    {"type": "text", "text": _prompt_text(prompt, schema_json)},
                 ]},
                 deadline,
                 on_notification=lambda message: _extract_text(message, session_id, chunks),
@@ -478,13 +596,24 @@ def _run_codex(prompt: str, schema: Type[BaseModel], model: Optional[str]) -> st
 
 def generate_json(
     prompt: str,
-    schema: Type[BaseModel],
+    schema: Any,
     model: Optional[str] = None,
 ) -> tuple[dict, None]:
     """Return a schema-validated object and unavailable cost information."""
     import gemini_worker
 
-    text = _run_codex(prompt, schema, model)
+    schema_json = schema.model_json_schema()
+    if bridge_url():
+        result = _bridge_http("/v1/generate", {
+            "prompt": prompt,
+            "schema": schema_json,
+            "model": model,
+        }, timeout())
+        text = result.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ACPProtocolError("ACP bridge returned no assistant JSON response")
+    else:
+        text = run_text(prompt, schema_json, model)
     try:
         parsed = gemini_worker._parse_json_response_text(text)
     except ValueError as exc:

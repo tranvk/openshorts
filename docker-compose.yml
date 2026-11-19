@@ -8,6 +8,16 @@ services:
       - .:/app
       - /app/__pycache__
       - ./output:/app/output
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_SCORE_BATCH=${LLM_SCORE_BATCH:-}
+      - ACP_BRIDGE_URL=${ACP_BRIDGE_URL:-}
+      - ACP_BRIDGE_TOKEN=${ACP_BRIDGE_TOKEN:-}
+      - ACP_TIMEOUT=${ACP_TIMEOUT:-600}
+      - ACP_MAX_CONCURRENT=${ACP_MAX_CONCURRENT:-2}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   frontend:
