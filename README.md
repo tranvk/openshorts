@@ -389,6 +389,84 @@ does not permit third-party applications to route Claude Pro/Max credentials on
 behalf of users. API-key-backed Claude remains possible through the existing
 OpenAI-compatible endpoint path when the endpoint supports that protocol.
 
+## Project handoff and remaining work
+
+This is the repository's living handoff, currently focused on
+subscription-backed model work. Keep it current in the same commit as related
+code: mark verified work complete, add newly discovered limitations, and leave
+enough context that the next contributor does not need the previous chat
+transcript. Add new subsections when work expands beyond ACP.
+
+### ACP current state (2026-11-18)
+
+- Codex ACP transcript scoring and detail selection are implemented on
+  `feature/subscription-acp-providers` (`8d6b122`). Responses use the existing
+  Pydantic schemas and never fall back to Gemini after an ACP failure.
+- The authenticated Windows-host bridge and Docker Compose wiring are
+  implemented (`69ce8a4`). The bridge exposes only authenticated health and
+  structured inference routes; it does not expose a generic command,
+  filesystem, credential, or ACP proxy surface.
+- `@agentclientprotocol/codex-acp` v2.6.0 completed a real ChatGPT-authenticated
+  request through the HTTP bridge. Focused provider tests currently report 27
+  passed and 3 skipped; the skips import the full video application, whose
+  OpenCV dependency is absent from the lightweight development environment.
+- `/api/config.localLlm` reports provider, model, transport, availability,
+  errors, and whether visual features still require Gemini. The dashboard only
+  uses the presence of this object to make the Gemini key optional; it does not
+  yet show the detailed status to the operator.
+- Claude subscription routing remains intentionally blocked. Revisit it only if
+  Anthropic publishes terms permitting third-party Claude.ai subscription use
+  or supplies a written integration agreement. Paid Claude API support is a
+  separate feature and must never be presented as subscription-backed.
+
+### Remaining TODOs
+
+- [ ] **P0 — Validate the actual Windows deployment end to end.** On the target
+  GTX 1660 machine, run Docker Desktop, local Whisper, the host bridge, a real
+  spoken video, clip selection, and final GPU render. Confirm the container can
+  reach `host.docker.internal:8765`, Codex authentication survives restarts, no
+  Gemini key is requested for transcript selection, and bridge traffic is not
+  reachable from LAN, Public, or Tailscale interfaces. Record exact Docker,
+  Windows, NVIDIA driver, and adapter versions here.
+- [ ] **P0 — Finish dashboard provider UX.** Show the configured provider,
+  model, `stdio`/`http-bridge` transport, availability, authentication/config
+  errors, and the `gemini-required` visual limitation. A provider failure must
+  be distinguishable from video-processing failures without exposing tokens,
+  bridge URLs, usernames, or local paths. Provider selection may remain an
+  environment setting; do not imply a runtime switch if a restart is required.
+- [ ] **P0 — Run the complete regression suite in a fully provisioned
+  environment.** Cover existing Gemini and OpenAI-compatible paths plus ACP
+  startup, authentication, timeout/cancellation, crash cleanup, malformed JSON,
+  schema rejection, concurrency, no-paid-fallback behavior, and the real
+  transcript-to-render pipeline. Document commands and honest pass/skip/fail
+  totals here; the focused tests are not a substitute for the full suite.
+- [ ] **P1 — Make the Windows bridge operationally durable.** Add a documented,
+  least-privilege Windows service/task setup, restart behavior, log retention
+  that cannot capture prompts or tokens, token rotation, an authenticated
+  health check, and a narrowly scoped Windows Defender Firewall rule. Do not
+  mount the Windows profile or Docker socket and do not publish port 8765 from
+  Compose.
+- [ ] **P1 — Remove or replace the remaining Gemini-only visual stages where a
+  supported provider exists.** Automatic layout selection, on-screen/screencast
+  analysis, and silent-video clip selection still require Gemini or use their
+  documented degradation path. Any replacement must use an officially
+  supported multimodal interface, preserve schema validation, and treat frames
+  and video as untrusted data; do not grant a coding agent host access.
+- [ ] **P2 — Re-evaluate Claude only when the authorization boundary changes.**
+  Verify both current Anthropic terms and the maintained adapter at that time.
+  Until then, keep `LLM_PROVIDER=claude-acp` fail-closed. If native Anthropic API
+  support is added, label its API-key billing explicitly and test that it cannot
+  consume or masquerade as a Claude Pro/Max subscription.
+
+### Required agent continuity
+
+Every agent that changes code, configuration, tests, or documentation in this
+repository must read this section first and update it before finishing. Update
+the relevant checkbox and context, add newly discovered TODOs or constraints,
+and record verification evidence. Never leave important handoff information
+only in a chat, and never mark an item complete based on an unrun or skipped
+test. Repository-level instructions are also in [`AGENTS.md`](AGENTS.md).
+
 ## Technical Pipeline
 
 ### Clip Generator
